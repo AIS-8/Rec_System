@@ -1,8 +1,7 @@
 # ANALYSIS — Amazon Electronics Real-Time Recommender
 
 Results, tables, and discussion for the full **retrieval → ranking** pipeline and the served
-web application. All numbers are produced by the notebooks (`01`–`07`) and evaluated on the
-**held-out, time-based test period** (2023-03-14 → 2023-09-06). 
+web application. All numbers are produced by the notebooks (`01`–`07`). 
 
 ---
 
