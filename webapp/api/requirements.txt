@@ -1,0 +1,15 @@
+# Unpinned so pip resolves a mutually compatible set for the image's Python.
+# The trained artifacts are version-portable: the LightGBM model is a text file,
+# item embeddings are .npy, and the FAISS index is rebuilt from the .npy at startup
+# (torch is installed separately from the CPU index in the Dockerfile).
+fastapi
+uvicorn[standard]
+pandas
+pyarrow
+numpy
+faiss-cpu
+lightgbm
+scikit-learn
+SQLAlchemy
+psycopg2-binary
+pydantic

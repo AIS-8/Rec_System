@@ -1,0 +1,54 @@
+# Real-time recommendation webapp — three independent services.
+#
+#   db        PostgreSQL: item metadata + user interaction history
+#   api       FastAPI: loads the two-tower + LightGBM + FAISS at startup and serves
+#             the retrieve -> rank pipeline as a REST API (Swagger at /docs)
+#   frontend  Streamlit: calls the API and renders the store
+#
+# Run everything with:   docker compose up --build
+# Then open:             http://localhost:8501   (store)   and   http://localhost:8000/docs (API)
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: recsys
+      POSTGRES_PASSWORD: recsys
+      POSTGRES_DB: recsys
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./webapp/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U recsys -d recsys"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports:
+      - "5432:5432"
+
+  api:
+    build:
+      context: .
+      dockerfile: webapp/api/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg2://recsys:recsys@db:5432/recsys
+      ARTIFACTS_DIR: /app/artifacts
+      DATA_DIR: /app/data
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build:
+      context: ./webapp/frontend
+    environment:
+      API_URL: http://api:8000
+    depends_on:
+      - api
+    ports:
+      - "8501:8501"
+
+volumes:
+  pgdata:
