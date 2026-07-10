@@ -2,11 +2,7 @@
 
 ElectroRec is a recommender built on the Amazon Reviews 2023 Electronics dataset. It goes all the way from raw review data to a running online store, where different parts of the page are powered by different models, just like a real e-commerce site. Under the hood it combines a retrieval stage that finds candidate products and a ranking stage that orders them, and it serves everything live through an API.
 
-## Demo
 
-![ElectroRec demo](docs/demo.gif)
-
-> Record a short screen capture of the store in action and save it as `docs/demo.gif` so it shows up here.
 
 ## What it does
 

@@ -2,8 +2,7 @@
 
 Results, tables, and discussion for the full **retrieval → ranking** pipeline and the served
 web application. All numbers are produced by the notebooks (`01`–`07`) and evaluated on the
-**held-out, time-based test period** (2023-03-14 → 2023-09-06). No code here — just results,
-tables, and interpretation.
+**held-out, time-based test period** (2023-03-14 → 2023-09-06). 
 
 ---
 
@@ -201,22 +200,7 @@ LambdaMART reliably improves NDCG@10.
 
 ---
 
-## 7 · Training cost (all on CPU, early-stopping)
-
-| Model | Training time | Notes |
-|---|---|---|
-| MF-BPR | ~117 s (~2 min) | 12 epochs; cheap embedding dot-product steps |
-| Two-tower | ~250 s (~4 min) | 20 epochs; two MLP towers + in-batch-negative softmax |
-| LightGBM ranker | ~8 s | 2.4M candidate rows; early-stops at iteration 13 |
-| **GRU4Rec** | ~1,761 s (~29 min) | 16 epochs; the GRU is sequential → slower per step |
-
-All PyTorch models are **device-agnostic** (`cuda if available`) — on Colab's T4 GPU they train
-~3–5× faster. **No GPU is required**; the whole project reproduces on CPU in well under an hour. CPU
-vs GPU changes only speed, not the results.
-
----
-
-## 8 · Bonus — GRU4Rec sequential retriever *(best accuracy)*
+## 7 · Bonus — GRU4Rec sequential retriever *(best accuracy)*
 
 MF-BPR and the two-tower treat a user as an unordered *bag* of items. **GRU4Rec** (from scratch,
 notebook `07`) instead reads the user's interactions **in time order** through a GRU and predicts the
@@ -235,7 +219,7 @@ GRU4Rec is **live in the web app** as the **"⏭️ Up next for you"** row.
 
 ---
 
-## 9 · Bonus — negative sampling (uniform vs popularity)
+## 8 · Bonus — negative sampling (uniform vs popularity)
 
 Two otherwise-identical MF-BPR models; the **only** difference is the negative sampler (notebook `03`).
 
@@ -252,7 +236,7 @@ depends on whether the product prioritizes precision at the top or long-tail dis
 
 ---
 
-## 10 · Bonus — personalized search (TF-IDF + LightGBM re-rank)
+## 9 · Bonus — personalized search (TF-IDF + LightGBM re-rank)
 
 A text-query retrieval mode (notebook `06`, **live in the app's search bar**). Every item **title** is
 indexed with **TF-IDF** (unigrams + bigrams, stop-words removed); a query retrieves the relevant
@@ -263,7 +247,7 @@ for that user). The final rank blends text relevance with the personalized score
 
 ---
 
-## 11 · Bonus — session personalization & fairness
+## 10 · Bonus — session personalization & fairness
 
 - **Session personalization (live in the app).** A user's recent in-session activity
   (search / like / cart / view) is fed back: ~40% of the "Recommended for you" feed is filled with
