@@ -28,6 +28,8 @@ MODEL_COLOR = {
     "Cosine similarity": "#14b8a6",       # teal
     "Personalized search": "#ec4899",     # pink
     "Search (TF-IDF)": "#8b5cf6",         # violet
+    "From your recent activity": "#0ea5e9",  # sky blue
+    "GRU4Rec (sequential)": "#f97316",       # orange
 }
 
 st.set_page_config(page_title="ElectroRec", page_icon="🛒", layout="wide",
@@ -116,12 +118,29 @@ st.session_state.setdefault("cart", {})        # item_idx -> item (session-only 
 st.session_state.setdefault("wishlist", {})    # item_idx -> item
 st.session_state.setdefault("likes", {})       # item_idx -> item
 st.session_state.setdefault("view", None)      # None=feed, "cart", or "wishlist"
+st.session_state.setdefault("recent_items", [])   # recent in-session item_idx (newest last)
+st.session_state.setdefault("recent_titles", {})  # item_idx -> title (for the caption)
 
 
-def open_item(i): st.session_state.item = i
+def note_activity(item):
+    """Record an in-session interaction so recommendations can adapt to it live."""
+    i = item["item_idx"]
+    r = st.session_state.recent_items
+    if i in r:
+        r.remove(i)
+    r.append(i)
+    st.session_state.recent_titles[i] = item.get("title")
+    del r[:-10]                                    # keep only the last 10
+
+
+def open_item(item): note_activity(item); st.session_state.item = item["item_idx"]
 def go_home(): st.session_state.item = None; st.session_state.view = None
 def open_cart(): st.session_state.view = "cart"; st.session_state.item = None
 def open_wishlist(): st.session_state.view = "wishlist"; st.session_state.item = None
+def reset_activity(): st.session_state.recent_items = []; st.session_state.recent_titles = {}
+def reset_session():   # switching accounts starts a fresh session (own bag + activity)
+    st.session_state.recent_items = []; st.session_state.recent_titles = {}
+    st.session_state.cart = {}; st.session_state.wishlist = {}; st.session_state.likes = {}
 
 
 def _toggle(store_key, item, added, removed):
@@ -130,7 +149,7 @@ def _toggle(store_key, item, added, removed):
     if i in store:
         del store[i]; st.toast(removed)
     else:
-        store[i] = item; st.toast(added)
+        store[i] = item; note_activity(item); st.toast(added)
 
 
 def toggle_cart(item): _toggle("cart", item, "🛒 Added to cart", "Removed from cart")
@@ -176,7 +195,7 @@ def card(item: dict, key: str):
                   type="primary" if i in st.session_state.likes else "secondary",
                   on_click=toggle_like, args=(item,))
         st.button("View  ·  Similar", key=key, on_click=open_item,
-                  args=(item["item_idx"],), use_container_width=True)
+                  args=(item,), use_container_width=True)
 
 
 def grid(items, prefix, cols=5):
@@ -216,6 +235,9 @@ bc1, bc2, bc3 = st.sidebar.columns(3)
 bc1.metric("Cart", len(_cart)); bc2.metric("Saved", len(_wish)); bc3.metric("Likes", len(_likes))
 st.sidebar.button("🛒  Open cart", use_container_width=True, on_click=open_cart)
 st.sidebar.button("❤️  Open wishlist", use_container_width=True, on_click=open_wishlist)
+if st.session_state.recent_items:
+    st.sidebar.button(f"🧹  Reset session activity ({len(st.session_state.recent_items)})",
+                      use_container_width=True, on_click=reset_activity)
 st.sidebar.markdown("---")
 st.sidebar.caption("Guests see popular items. Sign in to get personalized picks "
                    "(Two-tower + LightGBM) and a *Because you liked* row from your history. "
@@ -230,10 +252,11 @@ with search_col:
         "Search", value="", label_visibility="collapsed",
         placeholder="🔎  Search products")
 with signin_col:
-    choice = st.selectbox("👤  Sign in as", labels, index=0)
+    # switching accounts clears the previous user's bag + session activity
+    choice = st.selectbox("👤  Sign in as", labels, index=0, key="signin_choice",
+                          on_change=reset_session)
     if choice.startswith("🚪"):
-        st.session_state.user = None
-        _stats = None
+        st.session_state.user, _stats = None, None
     else:
         u = demo_users[labels.index(choice) - 1]
         st.session_state.user = u["user_idx"]
@@ -329,13 +352,16 @@ if query and query.strip():
     res = api_fresh("/search", params)
     if res is not None:
         section(res)
+        # searching signals intent — record the top hit so the feed can adapt to it
+        if st.session_state.user is not None and res.get("items"):
+            note_activity(res["items"][0])
         if st.session_state.user is None:
             st.caption("Text-relevance results (TF-IDF over titles). "
                        "Sign in to get these ranked *for you*.")
         else:
             st.caption(f"Ranked for {name_for(st.session_state.user)} — TF-IDF text relevance "
-                       "blended with a LightGBM re-rank on your features. Sign out and search "
-                       "the same term to see the non-personalized order.")
+                       "blended with a LightGBM re-rank on your features. This search also nudges "
+                       "your **Recommended for you** feed — go back home and Refresh to see it.")
         if res["items"]:
             grid(res["items"], "search")
         else:
@@ -352,10 +378,36 @@ if st.session_state.user is None:
         section(pop); grid(pop["items"], "pop")
 else:
     uid = st.session_state.user
-    rec = api_fresh(f"/recommend/{uid}", {"k": 10})
+    params = {"k": 10}
+    recent = st.session_state.recent_items
+    if recent:
+        params["recent"] = ",".join(map(str, recent))
+    rec = api_fresh(f"/recommend/{uid}", params)
     if rec:
-        section(rec); grid(rec["items"], "rec")
+        section(rec)
+        if recent:
+            last = st.session_state.recent_titles.get(recent[-1]) or "a recent item"
+            st.caption(f"🧭 Adapting to your recent activity — e.g. “{(last or '')[:45]}”.")
+        grid(rec["items"], "rec")
     st.markdown("---")
-    bel = api_fresh(f"/because-you-liked/{uid}", {"k": 10})
+    # anchor on items the user ACTUALLY liked/carted (not searches/views);
+    # if none, the API falls back to a positive item from their history.
+    liked = list(st.session_state.likes) + [i for i in st.session_state.cart
+                                            if i not in st.session_state.likes]
+    bel_params = {"k": 10}
+    if liked:
+        bel_params["recent"] = ",".join(map(str, liked))
+    bel = api_fresh(f"/because-you-liked/{uid}", bel_params)
     if bel and bel.get("items"):
         section(bel); grid(bel["items"], "bel")
+    # ---- "Up next for you" — GRU4Rec sequential model (bonus) ----
+    nxt_params = {"k": 10}
+    if recent:
+        nxt_params["recent"] = ",".join(map(str, recent))
+    nxt = api_fresh(f"/next/{uid}", nxt_params)
+    if nxt and nxt.get("items"):
+        st.markdown("---")
+        section(nxt)
+        st.caption("Your **sequential** model (GRU4Rec) predicting what you're likely to want "
+                   "**next** — learned from the *order* of your activity, not just what you liked.")
+        grid(nxt["items"], "next")

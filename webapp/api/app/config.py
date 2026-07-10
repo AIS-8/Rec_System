@@ -15,6 +15,10 @@ HIDDEN = (128,)
 OUT_DIM = 64
 TEMPERATURE = 0.1
 
+# GRU4Rec architecture — must match how it was trained (notebook 07).
+GRU_HIDDEN = 64
+GRU_MAX_LEN = 30
+
 # Serving knobs
 N_CANDIDATES = 100     # top-K retrieved per user before ranking
 POSITIVE_THRESHOLD = 4.0
@@ -22,3 +26,7 @@ POSITIVE_THRESHOLD = 4.0
 # Personalized search: final rank blends text relevance with the personalized
 # LightGBM score. Higher = sharper on the query wording; lower = more personalized.
 SEARCH_TEXT_WEIGHT = 0.6
+
+# Session personalization: fraction of the recommendation feed given to items
+# content-similar to the user's recent in-session activity (likes/cart/views/searches).
+SESSION_FRACTION = 0.4

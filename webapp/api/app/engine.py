@@ -28,6 +28,7 @@ from recsys.faiss_index import build_flat_ip, search as faiss_search
 from recsys.features import (FEATURE_COLS, build_features, compute_item_stats,
                              compute_user_cat_counts, compute_user_stats)
 from recsys.models.two_tower import TwoTower
+from recsys.models.gru4rec import GRU4Rec
 
 from . import config
 
@@ -83,6 +84,19 @@ class Engine:
         # LightGBM ranker
         self.ranker = lgb.Booster(model_file=str(art / "lgbm_ranker.txt"))
 
+        # GRU4Rec sequential retriever (bonus) — optional; skip gracefully if absent
+        self.gru = None
+        try:
+            self.gru = GRU4Rec(self.n_items, emb=config.EMB_DIM, hidden=config.GRU_HIDDEN,
+                               max_len=config.GRU_MAX_LEN, temperature=config.TEMPERATURE)
+            self.gru.load_state_dict(torch.load(art / "gru4rec.pt", map_location="cpu"))
+            self.gru.eval()
+            self.gru_item_emb = np.load(art / "gru4rec_item_emb.npy").astype("float32")
+            self.gru_index = build_flat_ip(self.gru_item_emb)
+            print("[engine] GRU4Rec sequential model loaded", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[engine] GRU4Rec not available ({exc}) — 'Up next' disabled", flush=True)
+
         print("[engine] loading data from Postgres ...", flush=True)
         self.items_df = pd.read_sql("SELECT * FROM items", self.sql).set_index("item_idx")
         inter = pd.read_sql(
@@ -105,6 +119,11 @@ class Engine:
         recent = (test.sort_values("ts", ascending=False)
                       .groupby("user_idx")["item_idx"].apply(lambda s: list(map(int, s))))
         self.recent = {int(u): v for u, v in recent.items()}
+
+        # time-ordered training sequence per user (input to GRU4Rec's "Up next")
+        tr_sorted = train.sort_values("timestamp")
+        self.user_seq = {int(u): list(map(int, g))
+                         for u, g in tr_sorted.groupby("user_idx")["item_idx"]}
 
         pop = train[train.positive]["item_idx"].value_counts()
         self.pop_items = pop.index.to_numpy()
@@ -172,36 +191,88 @@ class Engine:
         neighbours = [int(i) for i in ids[0] if int(i) != item_idx][:k]
         return self._decorate(neighbours, "Cosine similarity")
 
-    def recommend_for_user(self, user_idx: int, k: int = 10,
-                           temperature: float = 0.4) -> list[dict]:
+    def recommend_for_user(self, user_idx: int, k: int = 10, temperature: float = 0.4,
+                           recent: list[int] | None = None) -> list[dict]:
         # cold / unknown user -> popularity fallback
         if user_idx not in self.seen and user_idx not in self.recent:
             return self.popular(k, temperature)
 
-        # 1) user tower forward pass -> user embedding
+        valid_recent = [int(r) for r in (recent or []) if 0 <= int(r) < self.n_items]
+        exclude = set(self.seen.get(user_idx, set())) | set(valid_recent)
+
+        # 1) base personalized feed: user tower -> FAISS -> LightGBM -> temperature sample
         with torch.no_grad():
             uvec = self.model.user_vectors(torch.tensor([user_idx], dtype=torch.long))
-
-        # 2) FAISS retrieval (over-retrieve, then drop already-seen items)
-        seen = self.seen.get(user_idx, set())
-        scores, ids = faiss_search(self.item_index, uvec, config.N_CANDIDATES + len(seen))
-        cand = [(int(i), float(s)) for i, s in zip(ids[0], scores[0]) if int(i) not in seen]
+        scores, ids = faiss_search(self.item_index, uvec, config.N_CANDIDATES + len(exclude))
+        cand = [(int(i), float(s)) for i, s in zip(ids[0], scores[0]) if int(i) not in exclude]
         cand = cand[: config.N_CANDIDATES]
         if not cand:
             return self.popular(k, temperature)
-
-        # 3) build ranking features and re-rank with LightGBM
         df = pd.DataFrame(cand, columns=["item_idx", "retrieval_score"])
         df["user_idx"] = user_idx
         feat = build_features(df, self.user_stats, self.item_stats,
                               self.user_cat, self.cat_of_item)
         feat["lgbm"] = self.ranker.predict(feat[FEATURE_COLS])
-
-        # 4) temperature-sample the top of the ranked list -> varied top-K
         top = feat.sort_values("lgbm", ascending=False).head(max(k * 3, 30))
-        chosen = _softmax_sample(top["item_idx"].to_numpy(), top["lgbm"].to_numpy(),
-                                 k, temperature, self.rng)
-        return self._decorate(chosen, "Two-tower + LightGBM")
+        base = _softmax_sample(top["item_idx"].to_numpy(), top["lgbm"].to_numpy(),
+                               k, temperature, self.rng)
+
+        if not valid_recent:
+            return self._decorate(base, "Two-tower + LightGBM")
+
+        # 2) session slots: items content-similar (TF-IDF titles) to recent activity —
+        # reliable and category-true (a viewed backpack surfaces other backpacks).
+        m = min(k, max(1, round(k * config.SESSION_FRACTION)))
+        sess = self._content_similar(valid_recent, exclude | set(base), m)
+        feed = (sess + [b for b in base if b not in sess])[:k]
+        out = self._decorate(feed, "Two-tower + LightGBM")
+        sset = set(sess)
+        for d in out:
+            if d["item_idx"] in sset:
+                d["model"] = "From your recent activity"
+        return out
+
+    def next_for_user(self, user_idx: int, k: int = 10,
+                      recent: list[int] | None = None) -> list[dict]:
+        """GRU4Rec 'Up next' — feed the user's time-ordered sequence (history + any live
+        in-session activity) through the GRU and retrieve the predicted next items."""
+        if self.gru is None:
+            return []
+        seq = list(self.user_seq.get(user_idx, []))
+        live = [int(r) for r in (recent or []) if 0 <= int(r) < self.n_items]
+        seq = (seq + live)[-config.GRU_MAX_LEN:]
+        if not seq:
+            return []
+        inp = torch.tensor([seq], dtype=torch.long)
+        lens = torch.tensor([len(seq)], dtype=torch.long)
+        with torch.no_grad():
+            rep = self.gru.seq_repr(inp, lens).cpu().numpy().astype("float32")
+        exclude = set(self.seen.get(user_idx, set())) | set(live)
+        _, ids = faiss_search(self.gru_index, rep, k + len(exclude))
+        chosen = [int(i) for i in ids[0] if int(i) not in exclude][:k]
+        return self._decorate(chosen, "GRU4Rec (sequential)")
+
+    def _content_similar(self, recent: list[int], exclude: set, m: int) -> list[int]:
+        """Items whose titles are most similar (TF-IDF cosine) to the recent activity.
+
+        Recent items are **recency-weighted** (newest = highest) so the user's latest
+        search/like dominates rather than being diluted by older activity.
+        """
+        w = np.arange(1, len(recent) + 1, dtype=float)               # newest (last) heaviest
+        w /= w.sum()
+        q = np.asarray(self.tfidf_mat[recent].multiply(w[:, None]).sum(axis=0))  # [1, vocab]
+        sims = np.asarray(self.tfidf_mat @ q.T).ravel()              # [n_items]
+        out = []
+        for i in np.argsort(-sims):
+            i = int(i)
+            if sims[i] <= 0:
+                break
+            if i in exclude:
+                continue
+            out.append(i)
+            if len(out) >= m:
+                break
+        return out
 
     def search(self, query: str, user_idx: int | None = None, k: int = 10) -> dict:
         """Personalized search: TF-IDF title retrieval -> LightGBM re-rank.
@@ -247,11 +318,16 @@ class Engine:
                                         "Personalized search"),
                 "personalized": True}
 
-    def because_you_liked(self, user_idx: int, k: int = 10) -> dict | None:
-        rec = self.recent.get(user_idx) or list(self.seen.get(user_idx, []))
-        if not rec:
-            return None
-        seed_item = self.rng.choice(rec)   # vary the anchor item on reload
+    def because_you_liked(self, user_idx: int, k: int = 10,
+                          recent: list[int] | None = None) -> dict | None:
+        valid_recent = [int(r) for r in (recent or []) if 0 <= int(r) < self.n_items]
+        if valid_recent:
+            seed_item = valid_recent[-1]                 # the most recent in-session action
+        else:
+            rec = self.recent.get(user_idx) or list(self.seen.get(user_idx, []))
+            if not rec:
+                return None
+            seed_item = self.rng.choice(rec)             # else vary the anchor on reload
         seed = self.get_item(seed_item)
         if seed is None:
             return None

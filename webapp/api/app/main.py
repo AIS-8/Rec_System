@@ -95,10 +95,23 @@ def popular(k: int = Query(10, ge=1, le=50), temperature: float = 0.5):
 
 
 @app.get("/recommend/{user_idx}", response_model=schemas.RecResponse)
-def recommend(user_idx: int, k: int = Query(10, ge=1, le=50), temperature: float = 0.4):
-    items, ms = _timed(lambda: _engine().recommend_for_user(user_idx, k, temperature))
+def recommend(user_idx: int, k: int = Query(10, ge=1, le=50), temperature: float = 0.4,
+              recent: str | None = Query(None, description="comma-separated recent item_idx")):
+    recent_ids = ([int(x) for x in recent.split(",") if x.strip().lstrip("-").isdigit()]
+                  if recent else None)
+    items, ms = _timed(lambda: _engine().recommend_for_user(user_idx, k, temperature, recent_ids))
     model = items[0]["model"] if items else "Two-tower + LightGBM"
-    return schemas.RecResponse(section="Recommended for you", model=model,
+    section = "Recommended for you" + (" · tuned to your recent activity" if recent_ids else "")
+    return schemas.RecResponse(section=section, model=model, items=items, latency_ms=ms)
+
+
+@app.get("/next/{user_idx}", response_model=schemas.RecResponse)
+def next_up(user_idx: int, k: int = Query(10, ge=1, le=50),
+            recent: str | None = Query(None, description="comma-separated recent item_idx")):
+    recent_ids = ([int(x) for x in recent.split(",") if x.strip().lstrip("-").isdigit()]
+                  if recent else None)
+    items, ms = _timed(lambda: _engine().next_for_user(user_idx, k, recent_ids))
+    return schemas.RecResponse(section="⏭️ Up next for you", model="GRU4Rec (sequential)",
                                items=items, latency_ms=ms)
 
 
@@ -120,8 +133,11 @@ def similar(item_idx: int, k: int = Query(10, ge=1, le=50)):
 
 
 @app.get("/because-you-liked/{user_idx}", response_model=schemas.BecauseResponse)
-def because_you_liked(user_idx: int, k: int = Query(10, ge=1, le=50)):
-    out, ms = _timed(lambda: _engine().because_you_liked(user_idx, k))
+def because_you_liked(user_idx: int, k: int = Query(10, ge=1, le=50),
+                      recent: str | None = Query(None, description="comma-separated recent item_idx")):
+    recent_ids = ([int(x) for x in recent.split(",") if x.strip().lstrip("-").isdigit()]
+                  if recent else None)
+    out, ms = _timed(lambda: _engine().because_you_liked(user_idx, k, recent_ids))
     if out is None:
         raise HTTPException(404, "no recent history for this user")
     return schemas.BecauseResponse(
