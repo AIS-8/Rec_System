@@ -1,0 +1,19 @@
+# Keep the Docker build context small — exclude the raw data and everything the
+# webapp doesn't need. The API image only needs src/recsys, artifacts/, and a few
+# small Parquet files under data/.
+Electronics.jsonl/
+meta_Electronics.jsonl
+*.jsonl
+.venv/
+venv/
+Course_Materials/
+notebooks/
+data/subsample.log
+data/results/
+data/_sample_test/
+.git/
+**/__pycache__/
+*.pyc
+*.log
+project*.md
+scratchpad/
